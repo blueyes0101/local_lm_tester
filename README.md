@@ -4,6 +4,8 @@ A batch testing tool that sends user-defined questions to multiple Ollama models
 
 Two interfaces are provided: a CLI tool (`main.py`) and a Streamlit web app (`app.py`).
 
+![Setup Screen](docs/screenshot101.png)
+
 ## Requirements
 
 - Python 3.10+
