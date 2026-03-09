@@ -1,5 +1,4 @@
-# Test results
-lm-arena-results/
+# Test results (keep lm-arena-results/ tracked as sample data)
 BigLocalarena-results/
 
 # Logs
