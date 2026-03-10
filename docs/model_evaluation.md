@@ -185,3 +185,80 @@
 | qwen3.5:9b | D3 | 10 | CAP theorem + polyglot persistence — best D3 answer |
 | qwen3.5:9b | T3 | 10 | German: du + dmesg + SMART + journalctl + LVM — very comprehensive |
 | granite3.1-dense:8b | T2 | 9 | Best iptables-persistent Ubuntu-compatible answer in its series |
+
+---
+
+## Group D — Large (14B–35B) · March 10, 2026
+
+> **Note:** All Group D models were tested on the same RTX 4080 / 64 GB DDR5 platform. The 420s timeout was the hard limit per question. Several models suffered from reasoning overhead causing cascading timeouts.
+
+### Score Table
+
+| Model | Grp | D1 | D2 | D3 | T1 | T2 | T3 | P1 | P2 | P3 | Lang | Sys | Prog | **Total** | Time |
+|-------|-----|----|----|----|----|----|----|----|----|-----|------|-----|------|-----------|------|
+| **ministral-3:14b** | D | 10 | 9 | 10 | 9 | 10 | 10 | 10 | 9 | 10 | 9.67 | 9.67 | 9.67 | **9.67** | ~8-157s |
+| **cogito:32b** | D | 9 | 9 | 9 | 8 | 9 | 9 | 9 | 6 | 9 | 9.00 | 8.67 | 8.00 | **8.68** | ~28-252s |
+| **aya:35b** | D | 9 | 9 | 8 | 8 | 4 | 8 | 5 | 8 | 7 | 8.67 | 6.67 | 6.67 | **7.57** | ~24-420s |
+| **deepseek-r1:32b** | D | 9 | 9 | 9 | 8 | 9 | 4 | 6 | 4 | 5 | 9.00 | 7.00 | 5.00 | **7.50** | ~139-420s |
+| **qwen3.5:35b** | D | 1 | 8 | 9 | 8 | 9 | 9 | 8 | 3 | 9 | 6.00 | 8.67 | 6.67 | **7.07** | ~90-421s |
+| **lfm2:latest (v2)** | D | 1 | 8 | 9 | 4 | 8 | 8 | 8 | 4 | 8 | 6.00 | 6.67 | 6.67 | **6.37** | ~10-55s |
+| **qwen3:32b** | D | 9 | 9 | 9 | 5 | 1 | 5 | 1 | 8 | 6 | 9.00 | 3.67 | 5.00 | **6.33** | ~205-420s |
+| **qwen3-vl:32b** | D | 1 | 1 | 9 | 1 | 1 | 5 | 1 | 5 | 1 | 3.67 | 2.33 | 2.33 | **2.93** | ~333-421s |
+
+### Group D Ranking
+
+| Rank | Model | Lang | Sys | Prog | Total |
+|------|-------|-----:|----:|-----:|------:|
+| D1 | ministral-3:14b | 9.67 | 9.67 | 9.67 | **9.67** |
+| D2 | cogito:32b | 9.00 | 8.67 | 8.00 | **8.68** |
+| D3 | aya:35b | 8.67 | 6.67 | 6.67 | **7.57** |
+| D4 | deepseek-r1:32b | 9.00 | 7.00 | 5.00 | **7.50** |
+| D5 | qwen3.5:35b | 6.00 | 8.67 | 6.67 | **7.07** |
+| D6 | lfm2:latest (v2) | 6.00 | 6.67 | 6.67 | **6.37** |
+| D7 | qwen3:32b | 9.00 | 3.67 | 5.00 | **6.33** |
+| D8 | qwen3-vl:32b | 3.67 | 2.33 | 2.33 | **2.93** |
+
+### Notable Findings — Group D
+
+**Critical Errors**
+
+| Model | Question | Score | Error |
+|-------|----------|-------|-------|
+| aya:35b | T2 | 4 | `* * * * * DROP` — cron syntax used instead of iptables. Core concept understood but completely wrong syntax |
+| qwen3:32b | T2 | 1 | 420s timeout — completely empty response |
+| qwen3:32b | P1 | 1 | 420s timeout — empty response |
+| qwen3-vl:32b | D1,D2,T1,T2,P1,P3 | 1 | 6 out of 9 questions timed out — vision model not suitable for text tasks |
+| deepseek-r1:32b | T3,P1,P2,P3 | 4-6 | Timeout cascade from T3 onward — reasoning overhead increases with model size |
+| qwen3.5:35b | D1 | 1 | 420s timeout — no response |
+| qwen3.5:35b | P2 | 3 | 420s timeout — partial conceptual code only |
+| lfm2:latest | D1 | 1 | Translated Turkish to Turkish again — same persistent error as v1 |
+| lfm2:latest | T1 | 4 | Mixed Spanish ("puerto") and Turkish — language confusion in output |
+| lfm2:latest | P2 | 4 | Used kazoo/ZooKeeper library — completely wrong for Hermes |
+
+**Highlights**
+
+| Model | Question | Score | Note |
+|-------|----------|-------|------|
+| ministral-3:14b | T2 | 10 | loopback + ESTABLISHED + SSH restrict + HTTP/HTTPS + netfilter-persistent — complete |
+| ministral-3:14b | T3 | 10 | journalctl --vacuum + iotop + SMART + swap + logrotate summary table |
+| ministral-3:14b | P3 | 10 | Parameterized query + context manager + type hints + docstring + SQLAlchemy bonus |
+| cogito:32b | T2 | 9 | Complete iptables with all required rules and netfilter-persistent |
+| qwen3.5:35b | T2 | 9 | Detailed explanation including stateful firewall (conntrack) |
+| qwen3.5:35b | T3 | 9 | inode check (df -i) + lsof +L1 + journalctl vacuum — most thorough T3 in batch |
+
+---
+
+## 8B vs Large Model Comparison
+
+| Model Family | 8B Score | Large Score | Δ | Verdict |
+|---|---|---|---|---|
+| ministral-3 | 9.20 (latest) | **9.67** (14b) | +0.47 | ✅ Clear improvement |
+| cogito | 7.30 (8b) | **8.68** (32b) | +1.38 | ✅ Major gain |
+| aya | 6.87 (8b) | **7.57** (35b) | +0.70 | ✅ Meaningful improvement |
+| deepseek-r1 | 8.68 (8b) | **7.50** (32b) | -1.18 | ⚠️ Reasoning timeout grows with size |
+| qwen3.5 | 7.40 (9b) | **7.07** (35b) | -0.33 | ⚠️ D1+P2 timeouts drag score |
+| lfm2 | 6.40 (latest) | **6.37** (v2) | -0.03 | → Same structural problems |
+| qwen3 | 8.68 (8b) | **6.33** (32b) | -2.35 | ❌ Timeout pressure collapses system category |
+| qwen3-vl | 8.50 (8b) | **2.93** (32b) | -5.57 | ❌ Vision model — completely unsuitable for text at 32B |
+
+> **Key finding:** Bigger is not always better. Models with internal chain-of-thought reasoning (deepseek-r1, qwen3, qwen3-vl) hit the 420s timeout more frequently at larger sizes. ministral-3 and cogito scale well because they respond more directly without long thinking preambles.
