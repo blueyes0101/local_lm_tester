@@ -1,6 +1,6 @@
 # local-lm-arena
 
-A batch testing tool for running questions against multiple local Ollama models simultaneously, comparing their responses side by side and saving results as Markdown files.
+A batch testing tool for running questions against multiple local LLMs simultaneously — served by **Ollama** or **LM Studio** — comparing their responses side by side and saving results as Markdown files.
 
 ![Setup Screen](docs/screenshot101.png)
 
@@ -8,20 +8,22 @@ A batch testing tool for running questions against multiple local Ollama models 
 
 ## Features
 
+- **Two backends** — Run models served by **Ollama** or **LM Studio** (OpenAI-compatible API); choose the backend at the top of the setup screen
 - **Card-based question builder** — Add/remove questions individually, set type (Text or Code), choose language for code questions
 - **Batch testing** — Test multiple models in one run, results saved per model and as a combined summary
-- **Real-time streaming** — Watch responses appear token by token with progress tracking
-- **Timeout & loop detection** — Configurable per-question timeout; automatic repetition detection stops looping models and moves on
-- **Model management** — View installed models with file path and size, delete models directly from the UI
-- **Two interfaces** — Streamlit web app (`app.py`) and interactive CLI (`main.py`)
+- **Real-time streaming (Ollama)** — Watch responses appear token by token with progress tracking; LM Studio runs non-streaming with a spinner
+- **Timeout & loop detection** — Configurable per-question timeout (both backends); automatic repetition detection stops looping models on the streaming path (Ollama)
+- **Model management** — Ollama: view installed models with file path and size, pull and delete from the UI; LM Studio: connect to the server and select loaded models
+- **Two interfaces** — Streamlit web app (`app.py`, both backends) and interactive CLI (`main.py`, Ollama)
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.com/) installed and running (`ollama serve`)
-- At least one model pulled (e.g. `ollama pull llama3`)
+- One of the following backends:
+  - **[Ollama](https://ollama.com/)** installed and running (`ollama serve`) with at least one model pulled (e.g. `ollama pull llama3`), **or**
+  - **[LM Studio](https://lmstudio.ai/)** with its local server running (default `http://localhost:1234`) and a model loaded
 
 ## Installation
 
@@ -39,11 +41,19 @@ streamlit run app.py
 
 3-step wizard: **Setup → Running → Results**
 
+At the top of **Setup**, pick the backend:
+- **Ollama** — uses installed Ollama models (pull/delete supported).
+- **LM Studio** — enter the server **Base URL** (default `http://localhost:1234`) and an optional API key, click **Connect & Fetch Models**, then select models to test.
+
+See [docs/llm_master_benchmark_en.md](docs/llm_master_benchmark_en.md) for full details on the LM Studio backend.
+
 ### CLI
 
 ```bash
 python main.py
 ```
+
+> The CLI targets Ollama. LM Studio support is available in the web app.
 
 ---
 
@@ -93,4 +103,4 @@ Models include: CodeGemma, CodeLlama, DeepSeek-Coder, DeepCoder, StarCoder2, Ope
 
 Each test run produces:
 - `<model>_<timestamp>.md` — per-model responses with timing
-- `summary_<timestamp>.md` — side-by-side comparison across all models
+- `summary_<timestamp>.md` — side-by-side comparison across all models (the header records the backend used)
