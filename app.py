@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime
 
 import ollama
+import requests
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,11 @@ DEFAULTS = {
     "cancelled": False,
     "timestamp": "",
     "pull_status": None,
+    "backend": "ollama",                        # "ollama" or "lmstudio"
+    "lmstudio_base_url": "http://localhost:1234", # LM Studio server URL
+    "lmstudio_api_key": "",                     # optional API key
+    "lmstudio_connected": False,                # whether connection was verified
+    "lmstudio_models": [],                      # models fetched from LM Studio
 }
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
@@ -64,6 +70,73 @@ def check_ollama_online() -> bool:
         return True
     except Exception:
         return False
+
+
+def lmstudio_get_models(base_url: str, api_key: str = "") -> list[dict]:
+    """Fetch available models from an LM Studio server via GET /v1/models.
+
+    Returns a list of dicts with 'id' and 'owned_by'. Raises the underlying
+    requests exception (or HTTPError) on connection/HTTP failure so callers can
+    surface the status or message.
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    resp = requests.get(
+        f"{base_url.rstrip('/')}/v1/models",
+        headers=headers,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    models = []
+    for m in data.get("data", []):
+        models.append({
+            "id": m.get("id", "unknown"),
+            "owned_by": m.get("owned_by", ""),
+        })
+    return models
+
+
+def lmstudio_chat(base_url: str, model: str, question: str,
+                  api_key: str = "", timeout: int = 120) -> tuple[str, float]:
+    """Send a single non-streaming chat request to LM Studio.
+
+    Returns (response_text, elapsed_seconds). A timeout of 0 means no limit.
+    Raises requests exceptions (including Timeout) on failure.
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": question}],
+        "stream": False,
+        "temperature": 0.7,
+        "max_tokens": 2048,
+    }
+
+    start = time.time()
+    response = requests.post(
+        f"{base_url.rstrip('/')}/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=timeout if timeout and timeout > 0 else None,
+    )
+    elapsed = time.time() - start
+    response.raise_for_status()
+    data = response.json()
+    # A 2xx response can still carry an error body (e.g. model failed to load),
+    # in which case "choices" is missing/empty. Surface the server's own message
+    # instead of an opaque KeyError.
+    choices = data.get("choices") or []
+    if not choices:
+        err = data.get("error")
+        msg = err.get("message") if isinstance(err, dict) else (err or "no choices returned")
+        raise ValueError(f"LM Studio returned no completion: {msg}")
+    text = choices[0].get("message", {}).get("content", "")
+    return text, elapsed
 
 
 def _extract_blob_dir(modelfile: str) -> str:
@@ -152,11 +225,18 @@ def write_summary_markdown(
     models: list[str],
     questions: list[str],
     results: dict,
+    backend: str = "ollama",
+    base_url: str = "",
 ) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if backend == "lmstudio":
+        backend_line = f"**Backend:** LM Studio ({base_url})"
+    else:
+        backend_line = "**Backend:** Ollama"
     lines = [
         "# Test Summary",
         f"**Date:** {now}",
+        backend_line,
         f"**Total Questions:** {len(questions)}",
         "",
         "## Tested Models",
@@ -201,15 +281,26 @@ def build_zip(output_dir: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: Ollama status
+# Sidebar: backend status (Ollama or LM Studio)
 # ---------------------------------------------------------------------------
+online = False  # Ollama reachability; only checked when the Ollama backend is active
+# Use the live radio value when it exists (Step 1) so the sidebar does not lag a
+# rerun behind a backend switch; fall back to the mirrored key on Steps 2/3.
+sidebar_backend = st.session_state.get("_backend_radio", st.session_state.backend)
 with st.sidebar:
-    st.markdown("### Ollama Status")
-    online = check_ollama_online()
-    if online:
-        st.success("Online", icon="\u2705")
+    if sidebar_backend == "lmstudio":
+        st.markdown("### LM Studio Status")
+        if st.session_state.lmstudio_connected:
+            st.success("Connected", icon="\u2705")
+        else:
+            st.error("Not connected", icon="\u274c")
     else:
-        st.error("Offline - start Ollama with `ollama serve`", icon="\u274c")
+        st.markdown("### Ollama Status")
+        online = check_ollama_online()
+        if online:
+            st.success("Online", icon="\u2705")
+        else:
+            st.error("Offline - start Ollama with `ollama serve`", icon="\u274c")
 
     st.divider()
     st.caption("local-lm-arena v1.0")
@@ -224,6 +315,20 @@ st.title("\U0001f3df\ufe0f Local LM Arena")
 # ===================================================================
 if st.session_state.step == 1:
     st.header("Step 1: Setup")
+
+    # -- Backend selector (must come before anything else) --
+    backend_choice = st.radio(
+        "Backend",
+        options=["ollama", "lmstudio"],
+        format_func=lambda x: "Ollama" if x == "ollama" else "LM Studio",
+        horizontal=True,
+        key="_backend_radio",
+    )
+    # Mirror the widget choice into a plain key that survives later steps.
+    st.session_state.backend = backend_choice
+    backend = backend_choice
+
+    st.divider()
 
     # -- Questions (card-based builder) --
     st.subheader("Questions")
@@ -307,79 +412,135 @@ if st.session_state.step == 1:
 
     # -- Models --
     st.subheader("Models")
-    models_list = get_models()
-
-    if not models_list:
-        st.warning("No models found. Pull a model below or check that Ollama is running.")
-
     selected: list[str] = []
-    if models_list:
-        for idx, m in enumerate(models_list):
-            with st.container(border=True):
-                row = st.columns([0.04, 0.36, 0.12, 0.18, 0.08])
-                checked = row[0].checkbox(
-                    "sel", key=f"model_chk_{idx}", label_visibility="collapsed"
+
+    if backend == "ollama":
+        models_list = get_models()
+
+        if not models_list:
+            st.warning("No models found. Pull a model below or check that Ollama is running.")
+
+        if models_list:
+            for idx, m in enumerate(models_list):
+                with st.container(border=True):
+                    row = st.columns([0.04, 0.36, 0.12, 0.18, 0.08])
+                    checked = row[0].checkbox(
+                        "sel", key=f"model_chk_{idx}", label_visibility="collapsed"
+                    )
+                    row[1].markdown(f"**{m['name']}**")
+                    row[2].text(m["size"])
+                    row[3].text(m["modified"])
+                    if row[4].button(
+                        "\U0001f5d1\ufe0f", key=f"model_del_{idx}",
+                        help=f"Delete {m['name']} from system",
+                    ):
+                        st.session_state["_confirm_delete_model"] = m["name"]
+
+                    # Show blob directory
+                    if m["blob_dir"]:
+                        st.caption(f"\U0001f4c1 {m['blob_dir']}")
+
+                    if checked:
+                        selected.append(m["name"])
+
+            # Confirmation dialog for model deletion
+            model_to_delete = st.session_state.get("_confirm_delete_model")
+            if model_to_delete:
+                st.warning(
+                    f"\u26a0\ufe0f **\"{model_to_delete}\"** modeli sistemden kalici olarak "
+                    f"silinecek. Bu islem geri alinamaz."
                 )
-                row[1].markdown(f"**{m['name']}**")
-                row[2].text(m["size"])
-                row[3].text(m["modified"])
-                if row[4].button(
-                    "\U0001f5d1\ufe0f", key=f"model_del_{idx}",
-                    help=f"Delete {m['name']} from system",
+                confirm_cols = st.columns([0.2, 0.2, 0.6])
+                if confirm_cols[0].button(
+                    "\u2705 Evet, sil", key="confirm_del_model", type="primary"
                 ):
-                    st.session_state["_confirm_delete_model"] = m["name"]
+                    try:
+                        ollama.delete(model_to_delete)
+                        st.success(f"**{model_to_delete}** silindi.")
+                    except Exception as e:
+                        st.error(f"Silinemedi: {e}")
+                    st.session_state.pop("_confirm_delete_model", None)
+                    st.rerun()
+                if confirm_cols[1].button("\u274c Iptal", key="cancel_del_model"):
+                    st.session_state.pop("_confirm_delete_model", None)
+                    st.rerun()
 
-                # Show blob directory
-                if m["blob_dir"]:
-                    st.caption(f"\U0001f4c1 {m['blob_dir']}")
+    else:  # lmstudio
+        # -- LM Studio connection panel --
+        st.session_state.lmstudio_base_url = st.text_input(
+            "LM Studio Base URL:",
+            value=st.session_state.lmstudio_base_url,
+            placeholder="http://localhost:1234",
+        )
+        st.session_state.lmstudio_api_key = st.text_input(
+            "API Key (optional):",
+            value=st.session_state.lmstudio_api_key,
+            type="password",
+            help="LM Studio usually needs no key; sent as 'Authorization: Bearer <key>' if set.",
+        )
 
-                if checked:
-                    selected.append(m["name"])
+        if st.button("Connect & Fetch Models"):
+            # Reset prior checkbox state so a reordered/shorter model list cannot
+            # leave a stale check mapped onto a different model.
+            for k in [k for k in list(st.session_state.keys())
+                      if k.startswith("lm_model_chk_")]:
+                st.session_state.pop(k, None)
+            try:
+                fetched = lmstudio_get_models(
+                    st.session_state.lmstudio_base_url,
+                    st.session_state.lmstudio_api_key,
+                )
+                st.session_state.lmstudio_connected = True
+                st.session_state.lmstudio_models = fetched
+            except Exception as e:
+                st.session_state.lmstudio_connected = False
+                st.session_state.lmstudio_models = []
+                logging.error(f"LM Studio connect failed: {e}")
+                st.error(f"Connection failed: {e}", icon="\u274c")
 
-        # Confirmation dialog for model deletion
-        model_to_delete = st.session_state.get("_confirm_delete_model")
-        if model_to_delete:
-            st.warning(
-                f"\u26a0\ufe0f **\"{model_to_delete}\"** modeli sistemden kalici olarak "
-                f"silinecek. Bu islem geri alinamaz."
-            )
-            confirm_cols = st.columns([0.2, 0.2, 0.6])
-            if confirm_cols[0].button(
-                "\u2705 Evet, sil", key="confirm_del_model", type="primary"
-            ):
-                try:
-                    ollama.delete(model_to_delete)
-                    st.success(f"**{model_to_delete}** silindi.")
-                except Exception as e:
-                    st.error(f"Silinemedi: {e}")
-                st.session_state.pop("_confirm_delete_model", None)
-                st.rerun()
-            if confirm_cols[1].button("\u274c Iptal", key="cancel_del_model"):
-                st.session_state.pop("_confirm_delete_model", None)
-                st.rerun()
+        if st.session_state.lmstudio_connected:
+            st.success("Connected", icon="\u2705")
+            if st.session_state.lmstudio_models:
+                for idx, m in enumerate(st.session_state.lmstudio_models):
+                    with st.container(border=True):
+                        row = st.columns([0.06, 0.64, 0.30])
+                        checked = row[0].checkbox(
+                            "sel", key=f"lm_model_chk_{idx}",
+                            label_visibility="collapsed",
+                        )
+                        row[1].markdown(f"**{m['id']}**")
+                        if m.get("owned_by"):
+                            row[2].caption(f"owned_by: {m['owned_by']}")
+                        if checked:
+                            selected.append(m["id"])
+            else:
+                st.info("No models returned. Load a model in LM Studio, then reconnect.")
+        else:
+            st.info("Enter the base URL and click **Connect & Fetch Models**.")
 
     if len(selected) > 3:
         st.warning(
             "\u26a0\ufe0f You selected more than 3 models. The test may take a long time."
         )
 
-    # -- Pull model --
-    st.divider()
-    st.subheader("Pull a New Model")
-    pull_col1, pull_col2 = st.columns([0.7, 0.3])
-    pull_name = pull_col1.text_input(
-        "Model name to pull (e.g. llama3):",
-        label_visibility="collapsed",
-        placeholder="e.g. llama3",
-    )
-    if pull_col2.button("Pull Model", disabled=not pull_name):
-        with st.spinner(f"Pulling {pull_name}... this may take a while"):
-            try:
-                ollama.pull(pull_name)
-                st.success(f"Successfully pulled **{pull_name}**!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to pull model: {e}")
+    # -- Pull model (Ollama only) --
+    if backend == "ollama":
+        st.divider()
+        st.subheader("Pull a New Model")
+        pull_col1, pull_col2 = st.columns([0.7, 0.3])
+        pull_name = pull_col1.text_input(
+            "Model name to pull (e.g. llama3):",
+            label_visibility="collapsed",
+            placeholder="e.g. llama3",
+        )
+        if pull_col2.button("Pull Model", disabled=not pull_name):
+            with st.spinner(f"Pulling {pull_name}... this may take a while"):
+                try:
+                    ollama.pull(pull_name)
+                    st.success(f"Successfully pulled **{pull_name}**!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to pull model: {e}")
 
     st.divider()
 
@@ -403,7 +564,8 @@ if st.session_state.step == 1:
     st.divider()
 
     # -- Start button --
-    can_start = len(filled) > 0 and len(selected) > 0 and online
+    backend_ready = online if backend == "ollama" else st.session_state.lmstudio_connected
+    can_start = len(filled) > 0 and len(selected) > 0 and backend_ready
     if st.button(
         "\u25b6\ufe0f  Start Test",
         type="primary",
@@ -437,8 +599,10 @@ if st.session_state.step == 1:
         st.session_state.step = 2
         st.rerun()
 
-    if not online:
+    if backend == "ollama" and not online:
         st.info("Start Ollama to enable testing.")
+    elif backend == "lmstudio" and not st.session_state.lmstudio_connected:
+        st.info("Connect to LM Studio to enable testing.")
 
 # ===================================================================
 # STEP 2 - Running
@@ -446,6 +610,7 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.header("Step 2: Running Tests")
 
+    backend = st.session_state.backend
     questions = st.session_state.questions
     models = st.session_state.selected_models
     output_dir = st.session_state.output_dir
@@ -468,24 +633,26 @@ elif st.session_state.step == 2:
         status_widget = st.status(status_label, expanded=True)
 
         with status_widget:
-            # Warm up / load model
-            st.write(f"Loading **{model_name}**...")
-            try:
-                ollama.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": "hello"}],
-                )
-            except Exception as e:
-                msg = f"Failed to load model '{model_name}': {e}"
-                st.error(msg)
-                logging.error(msg)
-                status_widget.update(label=f"\u23ed\ufe0f Skipped: {model_name}", state="error")
-                completed += len(questions)
-                progress_bar.progress(
-                    completed / total_tasks,
-                    text=f"Skipped {model_name}",
-                )
-                continue
+            # Warm up / load model (Ollama only; LM Studio loads on demand and
+            # needs no warm-up ping)
+            if backend == "ollama":
+                st.write(f"Loading **{model_name}**...")
+                try:
+                    ollama.chat(
+                        model=model_name,
+                        messages=[{"role": "user", "content": "hello"}],
+                    )
+                except Exception as e:
+                    msg = f"Failed to load model '{model_name}': {e}"
+                    st.error(msg)
+                    logging.error(msg)
+                    status_widget.update(label=f"\u23ed\ufe0f Skipped: {model_name}", state="error")
+                    completed += len(questions)
+                    progress_bar.progress(
+                        completed / total_tasks,
+                        text=f"Skipped {model_name}",
+                    )
+                    continue
 
             model_responses: list[str] = []
             model_times: list[float] = []
@@ -504,82 +671,113 @@ elif st.session_state.step == 2:
                 st.markdown(f"---\n**Q{qi + 1}:** {qlabel}")
 
                 timeout = st.session_state.get("timeout_per_question", 120)
-                start = time.time()
-                stream = None
-                try:
-                    stream = ollama.chat(
-                        model=model_name,
-                        messages=[{"role": "user", "content": question}],
-                        stream=True,
-                    )
 
-                    # Stream with timeout and repetition detection
-                    # Use a list so the nested generator can mutate it
-                    chunks: list[str] = []
-                    state = {"hit_limit": ""}
+                if backend == "ollama":
+                    start = time.time()
+                    stream = None
+                    try:
+                        stream = ollama.chat(
+                            model=model_name,
+                            messages=[{"role": "user", "content": question}],
+                            stream=True,
+                        )
 
-                    def token_generator():
-                        recent_window = ""
-                        for chunk in stream:
-                            token = chunk.message.content
-                            chunks.append(token)
-                            # Timeout check
-                            if timeout > 0 and (time.time() - start) > timeout:
-                                state["hit_limit"] = "timeout"
-                                return
-                            # Repetition detection: check if the last ~200 chars
-                            # contain a repeating pattern
-                            recent_window += token
-                            if len(recent_window) > 500:
-                                recent_window = recent_window[-500:]
-                            if len(recent_window) >= 200:
-                                half = recent_window[len(recent_window) // 2:]
-                                first_half = recent_window[:len(recent_window) // 2]
-                                if len(half) > 80 and half[:80] in first_half:
-                                    state["hit_limit"] = "repetition"
+                        # Stream with timeout and repetition detection
+                        # Use a list so the nested generator can mutate it
+                        chunks: list[str] = []
+                        state = {"hit_limit": ""}
+
+                        def token_generator():
+                            recent_window = ""
+                            for chunk in stream:
+                                token = chunk.message.content
+                                chunks.append(token)
+                                # Timeout check
+                                if timeout > 0 and (time.time() - start) > timeout:
+                                    state["hit_limit"] = "timeout"
                                     return
-                            yield token
+                                # Repetition detection: check if the last ~200 chars
+                                # contain a repeating pattern
+                                recent_window += token
+                                if len(recent_window) > 500:
+                                    recent_window = recent_window[-500:]
+                                if len(recent_window) >= 200:
+                                    half = recent_window[len(recent_window) // 2:]
+                                    first_half = recent_window[:len(recent_window) // 2]
+                                    if len(half) > 80 and half[:80] in first_half:
+                                        state["hit_limit"] = "repetition"
+                                        return
+                                yield token
 
-                    response_text = st.write_stream(token_generator())
-                    elapsed = time.time() - start
-                    hit_limit = state["hit_limit"]
+                        response_text = st.write_stream(token_generator())
+                        elapsed = time.time() - start
+                        hit_limit = state["hit_limit"]
 
-                    # If we hit a limit, close the stream to stop Ollama generation
-                    # and ensure we move on cleanly to the next question
-                    if hit_limit:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
-                        response_text = "".join(chunks)
-                        if hit_limit == "timeout":
-                            st.warning(
-                                f"\u23f1\ufe0f Timeout ({timeout}s): skipping to next question. "
-                                f"Partial response saved."
+                        # If we hit a limit, close the stream to stop Ollama generation
+                        # and ensure we move on cleanly to the next question
+                        if hit_limit:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                            response_text = "".join(chunks)
+                            if hit_limit == "timeout":
+                                st.warning(
+                                    f"\u23f1\ufe0f Timeout ({timeout}s): skipping to next question. "
+                                    f"Partial response saved."
+                                )
+                            else:
+                                st.warning(
+                                    "\U0001f501 Repetition detected: model looping. "
+                                    "Skipping to next question. Partial response saved."
+                                )
+
+                        model_responses.append(response_text)
+                        model_times.append(elapsed)
+                        st.caption(f"Response time: {elapsed:.1f}s")
+
+                    except Exception as e:
+                        # Close stream on error too
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                        elapsed = time.time() - start
+                        err = f"Error on Q{qi + 1}: {e}"
+                        st.error(err)
+                        logging.error(f"{model_name} - {err}")
+                        model_responses.append(f"Error: {e}")
+                        model_times.append(elapsed)
+
+                else:  # lmstudio: non-streaming, no warm-up, no repetition detection
+                    base_url = st.session_state.lmstudio_base_url
+                    api_key = st.session_state.lmstudio_api_key
+                    start = time.time()
+                    try:
+                        with st.spinner(f"Waiting for {model_name} \u2014 Q{qi + 1}..."):
+                            response_text, elapsed = lmstudio_chat(
+                                base_url, model_name, question, api_key, timeout,
                             )
-                        else:
-                            st.warning(
-                                "\U0001f501 Repetition detected: model looping. "
-                                "Skipping to next question. Partial response saved."
-                            )
-
-                    model_responses.append(response_text)
-                    model_times.append(elapsed)
-                    st.caption(f"Response time: {elapsed:.1f}s")
-
-                except Exception as e:
-                    # Close stream on error too
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
-                    elapsed = time.time() - start
-                    err = f"Error on Q{qi + 1}: {e}"
-                    st.error(err)
-                    logging.error(f"{model_name} - {err}")
-                    model_responses.append(f"Error: {e}")
-                    model_times.append(elapsed)
+                        st.markdown(response_text)
+                        model_responses.append(response_text)
+                        model_times.append(elapsed)
+                        st.caption(f"Response time: {elapsed:.1f}s")
+                    except requests.exceptions.Timeout:
+                        elapsed = time.time() - start
+                        st.warning(
+                            f"\u23f1\ufe0f Timeout ({timeout}s): skipping to next question."
+                        )
+                        logging.error(f"{model_name} - Timeout on Q{qi + 1}")
+                        model_responses.append("TIMEOUT")
+                        model_times.append(elapsed)
+                    except Exception as e:
+                        elapsed = time.time() - start
+                        err = f"Error on Q{qi + 1}: {e}"
+                        st.error(err)
+                        logging.error(f"{model_name} - {err}")
+                        model_responses.append(f"Error: {e}")
+                        model_times.append(elapsed)
 
                 completed += 1
 
@@ -602,7 +800,10 @@ elif st.session_state.step == 2:
     # Save summary (use labels for display)
     labels = st.session_state.get("question_labels", questions)
     summary_path = os.path.join(output_dir, f"summary_{timestamp}.md")
-    write_summary_markdown(summary_path, models, labels, results)
+    write_summary_markdown(
+        summary_path, models, labels, results,
+        backend=backend, base_url=st.session_state.lmstudio_base_url,
+    )
 
     progress_bar.progress(1.0, text="All tests complete!")
 
@@ -699,6 +900,14 @@ elif st.session_state.step == 3:
                 cid = card.get("id", 0)
                 for prefix in ("q_text_", "q_type_", "q_lang_", "del_q_"):
                     st.session_state.pop(f"{prefix}{cid}", None)
+            # Drop the backend radio and stale model checkboxes so the reset to
+            # DEFAULTS (backend="ollama", empty selections) actually takes effect.
+            st.session_state.pop("_backend_radio", None)
+            for k in [
+                k for k in list(st.session_state.keys())
+                if k.startswith("model_chk_") or k.startswith("lm_model_chk_")
+            ]:
+                st.session_state.pop(k, None)
             for key, val in DEFAULTS.items():
                 st.session_state[key] = copy.deepcopy(val)
             st.rerun()
